@@ -1,4 +1,4 @@
-# vscode-custom-icon-macos
+# VSCode Custom Icon for macOS
 
 A lightweight, standalone CLI tool for macOS to customize, restore, and automate your **Visual Studio Code** application icon.
 
