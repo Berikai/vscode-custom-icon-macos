@@ -1,5 +1,7 @@
 # VSCode Custom Icon for macOS
 
+![proof_of_concept](./image.png)
+
 A lightweight, standalone CLI tool for macOS to customize, restore, and automate your **Visual Studio Code** application icon.
 
 Includes a macOS-styled dark icon designed to match the native system dark theme and neighboring dark squircle dock icons (e.g. Ableton Live, MiniMeters), complete with LaunchAgent automation to ensure your custom icon persists across automatic VS Code updates.
