@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# vscode-icon: CLI tool to customize, restore, and automate VS Code icon on macOS
+# ==============================================================================
+
+set -euo pipefail
+
+# --- Color formatting ---
+if [ -t 1 ]; then
+  RED=$(printf '\033[0;31m')
+  GREEN=$(printf '\033[0;32m')
+  YELLOW=$(printf '\033[0;33m')
+  BLUE=$(printf '\033[0;34m')
+  CYAN=$(printf '\033[0;36m')
+  BOLD=$(printf '\033[1m')
+  RESET=$(printf '\033[0m')
+else
+  RED=''
+  GREEN=''
+  YELLOW=''
+  BLUE=''
+  CYAN=''
+  BOLD=''
+  RESET=''
+fi
+
+info()    { echo "${CYAN}ℹ${RESET}  $*"; }
+success() { echo "${GREEN}✔${RESET}  $*"; }
+warn()    { echo "${YELLOW}▲${RESET}  $*"; }
+error()   { echo "${RED}✖${RESET}  $*" >&2; }
+
+# --- Resolve script directory (symlink-safe) ---
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+
+# --- App & file locations ---
+APP_PATH="${VSCODE_APP_PATH:-/Applications/Visual Studio Code.app}"
+RESOURCES="$APP_PATH/Contents/Resources"
+TARGET_ICNS="$RESOURCES/Code.icns"
+BACKUP_ICNS="$RESOURCES/Code.icns.original"
+
+DEFAULT_ICON="$SCRIPT_DIR/assets/dark.icns"
+if [ ! -f "$DEFAULT_ICON" ]; then
+  DEFAULT_ICON="$SCRIPT_DIR/Code.icns"
+fi
+
+PLIST_LABEL="com.user.vscode-icon"
+PLIST_FILE="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+
+# --- Helper functions ---
+check_app() {
+  if [ ! -d "$APP_PATH" ]; then
+    error "Visual Studio Code not found at '$APP_PATH'."
+    exit 1
+  fi
+}
+
+refresh_system() {
+  touch "$APP_PATH"
+  if [ -x "$LSREGISTER" ]; then
+    "$LSREGISTER" -f "$APP_PATH" >/dev/null 2>&1 || true
+  fi
+  killall Dock >/dev/null 2>&1 || true
+}
+
+# --- Subcommands ---
+cmd_apply() {
+  check_app
+
+  local icon_src="$DEFAULT_ICON"
+  local force=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -f|--force)
+        force=true
+        shift
+        ;;
+      -*)
+        error "Unknown option: $1"
+        usage
+        exit 1
+        ;;
+      *)
+        icon_src="$1"
+        shift
+        ;;
+    esac
+  done
+
+  if [ ! -f "$icon_src" ]; then
+    error "Icon file not found: $icon_src"
+    exit 1
+  fi
+
+  # Backup original icon if not yet backed up
+  if [ ! -f "$BACKUP_ICNS" ]; then
+    info "Creating backup of original icon..."
+    cp "$TARGET_ICNS" "$BACKUP_ICNS"
+    success "Backup saved to: $BACKUP_ICNS"
+  fi
+
+  # Check if icon is already identical
+  if [ "$force" = false ] && cmp -s "$icon_src" "$TARGET_ICNS"; then
+    info "VS Code icon is already up to date. (Use --force to re-apply)"
+    return 0
+  fi
+
+  info "Applying custom icon from: $icon_src"
+  cp "$icon_src" "$TARGET_ICNS"
+
+  info "Refreshing macOS LaunchServices and Dock..."
+  refresh_system
+
+  success "Custom icon applied successfully!"
+}
+
+cmd_restore() {
+  check_app
+
+  if [ ! -f "$BACKUP_ICNS" ]; then
+    error "No backup found at: $BACKUP_ICNS"
+    error "Cannot restore original icon."
+    exit 1
+  fi
+
+  info "Restoring original icon from backup..."
+  cp "$BACKUP_ICNS" "$TARGET_ICNS"
+
+  info "Refreshing macOS LaunchServices and Dock..."
+  refresh_system
+
+  success "Original VS Code icon restored successfully!"
+}
+
+cmd_status() {
+  echo "=== VS Code Custom Icon Status ==="
+  echo "Application:     ${CYAN}${APP_PATH}${RESET}"
+
+  if [ ! -d "$APP_PATH" ]; then
+    echo "Installed:       ${RED}No${RESET}"
+    return 0
+  else
+    echo "Installed:       ${GREEN}Yes${RESET}"
+  fi
+
+  # Backup status
+  if [ -f "$BACKUP_ICNS" ]; then
+    echo "Original Backup: ${GREEN}Present${RESET} (${BACKUP_ICNS})"
+  else
+    echo "Original Backup: ${YELLOW}Not found${RESET}"
+  fi
+
+  # Current icon comparison
+  if [ -f "$DEFAULT_ICON" ] && cmp -s "$DEFAULT_ICON" "$TARGET_ICNS"; then
+    echo "Current Icon:    ${GREEN}Custom Dark Icon (active)${RESET}"
+  elif [ -f "$BACKUP_ICNS" ] && cmp -s "$BACKUP_ICNS" "$TARGET_ICNS"; then
+    echo "Current Icon:    ${YELLOW}Original Default Icon${RESET}"
+  else
+    echo "Current Icon:    ${BLUE}Custom / Other${RESET}"
+  fi
+
+  # Boot automation status
+  if [ -f "$PLIST_FILE" ]; then
+    local loaded
+    loaded=$(launchctl print "gui/$(id -u)/${PLIST_LABEL}" 2>&1 || true)
+    if echo "$loaded" | grep -q "state ="; then
+      echo "Boot Automation: ${GREEN}Enabled & Active${RESET} (${PLIST_FILE})"
+    else
+      echo "Boot Automation: ${YELLOW}Plist present, but not loaded${RESET}"
+    fi
+  else
+    echo "Boot Automation: ${RED}Disabled${RESET}"
+  fi
+}
+
+cmd_automate() {
+  local action="${1:-status}"
+
+  case "$action" in
+    enable|install|on)
+      check_app
+      info "Configuring LaunchAgent for automatic boot/login execution..."
+      mkdir -p "$HOME/Library/LaunchAgents"
+
+      cat > "$PLIST_FILE" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${PLIST_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>${SCRIPT_DIR}/vscode-icon</string>
+        <string>apply</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/vscode-icon.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/vscode-icon.err</string>
+</dict>
+</plist>
+EOF
+
+      # Ensure permissions
+      chmod 644 "$PLIST_FILE"
+
+      # Reload service
+      launchctl unload "$PLIST_FILE" 2>/dev/null || true
+      launchctl load "$PLIST_FILE"
+
+      success "Boot automation enabled! Icon will automatically verify & apply on login."
+      ;;
+
+    disable|uninstall|off)
+      info "Disabling LaunchAgent boot automation..."
+      if [ -f "$PLIST_FILE" ]; then
+        launchctl unload "$PLIST_FILE" 2>/dev/null || true
+        rm -f "$PLIST_FILE"
+        success "Boot automation disabled and LaunchAgent removed."
+      else
+        info "Boot automation is already disabled."
+      fi
+      ;;
+
+    status)
+      cmd_status
+      ;;
+
+    *)
+      error "Unknown automation action: $action"
+      echo "Usage: $(basename "$0") automate [enable|disable|status]"
+      exit 1
+      ;;
+  esac
+}
+
+usage() {
+  cat <<EOF
+${BOLD}vscode-icon${RESET} - macOS CLI tool to change, restore, and automate your VS Code icon
+
+${BOLD}USAGE:${RESET}
+  $(basename "$0") <command> [arguments]
+
+${BOLD}COMMANDS:${RESET}
+  ${CYAN}apply${RESET} [icon.icns] [--force]
+      Apply the dark macOS-styled icon (or custom .icns path).
+      Automatically creates a backup of the original icon if none exists.
+      Skips reloading if already matching unless --force is given.
+
+  ${CYAN}restore${RESET}
+      Restore the original default VS Code icon from backup.
+
+  ${CYAN}automate${RESET} [enable | disable | status]
+      (or ${CYAN}automize${RESET})
+      Manage LaunchAgent to automatically re-apply the icon on every boot/login
+      (survives automatic VS Code application updates).
+
+  ${CYAN}status${RESET}
+      Display current icon, backup, and automation status.
+
+  ${CYAN}help${RESET}, ${CYAN}-h${RESET}, ${CYAN}--help${RESET}
+      Show this help message.
+
+${BOLD}EXAMPLES:${RESET}
+  ./vscode-icon apply                     # Apply bundled dark icon
+  ./vscode-icon apply /path/to/icon.icns  # Apply specific custom icon
+  ./vscode-icon restore                   # Revert back to original icon
+  ./vscode-icon automate enable           # Enable auto-apply on system boot
+  ./vscode-icon automate disable          # Disable boot automation
+  ./vscode-icon status                    # Check current state
+
+EOF
+}
+
+# --- Main Dispatcher ---
+main() {
+  if [ $# -eq 0 ]; then
+    usage
+    exit 0
+  fi
+
+  local command="$1"
+  shift
+
+  case "$command" in
+    apply)
+      cmd_apply "$@"
+      ;;
+    restore)
+      cmd_restore "$@"
+      ;;
+    automate|automize|auto)
+      cmd_automate "$@"
+      ;;
+    status)
+      cmd_status "$@"
+      ;;
+    help|-h|--help)
+      usage
+      ;;
+    *)
+      error "Unknown command: $command"
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
